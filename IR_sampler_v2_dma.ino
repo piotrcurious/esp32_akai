@@ -8,6 +8,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <cmath>
+#include <cstring>
 
 /*
  * MPC-style Sampler for ESP32 using DMA for ADC and DAC
@@ -48,7 +50,8 @@ const uint32_t DIGIT_CODES[] = {
 
 // --- State Variables ---
 uint8_t sampleBuffer[SAMPLE_BUFFER_SIZE];
-volatile bool isRecording = false;
+bool isRecording = false;
+int recordedLength = 0;
 volatile int activePlaybackSection = -1;
 float playbackSpeed = 1.0;
 float pitchPresets[4] = { 1.0, 1.0, 1.0, 1.0 };
@@ -62,16 +65,16 @@ IRState currentIRState = IDLE;
 int selectedFileID = 0;
 
 // --- ADC DMA Initialization ---
-void initADC() {
+bool initADC() {
     adc_continuous_handle_cfg_t adc_config = {
         .max_store_buf_size = 4096,
         .conv_frame_size = DMA_CHUNK_SIZE,
     };
-    adc_continuous_new_handle(&adc_config, &adc_handle);
+    if (adc_continuous_new_handle(&adc_config, &adc_handle) != ESP_OK) return false;
 
     adc_digi_pattern_config_t pattern = {
         .atten = ADC_ATTEN_DB_11,
-        .channel = ADC_CHAN & 0x7, // Only the channel number
+        .channel = (uint8_t)(ADC_CHAN & 0x7), // Only the channel number
         .unit = ADC_UNIT_1,
         .bit_width = ADC_BITWIDTH_12
     };
@@ -83,11 +86,12 @@ void initADC() {
         .conv_mode = ADC_CONV_SINGLE_UNIT_1,
         .format = ADC_DIGI_OUTPUT_FORMAT_TYPE1,
     };
-    adc_continuous_config(adc_handle, &dig_cfg);
+    if (adc_continuous_config(adc_handle, &dig_cfg) != ESP_OK) return false;
+    return true;
 }
 
 // --- DAC DMA Initialization ---
-void initDAC() {
+bool initDAC() {
     dac_continuous_config_t dac_config = {
         .chan_mask = DAC_CHAN_MASK,
         .desc_num = 8,
@@ -97,10 +101,21 @@ void initDAC() {
         .clk_src = DAC_DIGI_CLK_SRC_DEFAULT,
         .chan_mode = DAC_CHANNEL_MODE_SIMUL,
     };
-    dac_continuous_new_channels(&dac_config, &dac_handle);
-    dac_continuous_enable(dac_handle);
-    dac_continuous_start(dac_handle);
+    if (dac_continuous_new_channels(&dac_config, &dac_handle) != ESP_OK) return false;
+    if (dac_continuous_enable(dac_handle) != ESP_OK) return false;
+    if (dac_continuous_start(dac_handle) != ESP_OK) return false;
+    return true;
 }
+
+// --- File Format ---
+struct SampleHeader {
+    char magic[4]; // "AKAI"
+    uint16_t version;
+    uint32_t sampleRate;
+    uint32_t bufferSize;
+    uint32_t recordedLength;
+    float pitchPresets[4];
+};
 
 // --- File Operations ---
 void saveSample(int id) {
@@ -108,11 +123,21 @@ void saveSample(int id) {
   if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
     File f = LittleFS.open(path, "w");
     if (f) {
+      SampleHeader header = {
+          .magic = {'A', 'K', 'A', 'I'},
+          .version = 1,
+          .sampleRate = SAMPLING_RATE_HZ,
+          .bufferSize = SAMPLE_BUFFER_SIZE,
+          .recordedLength = (uint32_t)recordedLength
+      };
+      memcpy(header.pitchPresets, pitchPresets, sizeof(pitchPresets));
+
+      size_t written_h = f.write((uint8_t*)&header, sizeof(header));
       size_t written_audio = f.write(sampleBuffer, SAMPLE_BUFFER_SIZE);
-      size_t written_presets = f.write((uint8_t*)pitchPresets, sizeof(pitchPresets));
       f.close();
-      if (written_audio == SAMPLE_BUFFER_SIZE && written_presets == sizeof(pitchPresets)) {
-          Serial.printf("Saved %s\n", path);
+
+      if (written_h == sizeof(header) && written_audio == SAMPLE_BUFFER_SIZE) {
+          Serial.printf("Saved %s (%u samples)\n", path, header.recordedLength);
       } else {
           Serial.printf("Error: Partial write to %s\n", path);
       }
@@ -128,23 +153,35 @@ void loadSample(int id) {
   if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
     File f = LittleFS.open(path, "r");
     if (f) {
-      if (f.size() < (SAMPLE_BUFFER_SIZE + sizeof(pitchPresets))) {
+      SampleHeader header;
+      if (f.size() < (sizeof(header) + SAMPLE_BUFFER_SIZE)) {
           Serial.printf("Error: File %s is too small\n", path);
           f.close();
           xSemaphoreGive(bufferMutex);
           return;
       }
+
+      f.read((uint8_t*)&header, sizeof(header));
+      if (memcmp(header.magic, "AKAI", 4) != 0) {
+          Serial.printf("Error: %s is not a valid sample file\n", path);
+          f.close();
+          xSemaphoreGive(bufferMutex);
+          return;
+      }
+
       size_t read_audio = f.read(sampleBuffer, SAMPLE_BUFFER_SIZE);
-      size_t read_presets = f.read((uint8_t*)pitchPresets, sizeof(pitchPresets));
       f.close();
-      if (read_audio == SAMPLE_BUFFER_SIZE && read_presets == sizeof(pitchPresets)) {
+
+      if (read_audio == SAMPLE_BUFFER_SIZE) {
+          recordedLength = (int)header.recordedLength;
+          memcpy(pitchPresets, header.pitchPresets, sizeof(pitchPresets));
           // Basic validation for presets
           for (int i=0; i<4; i++) {
               if (std::isnan(pitchPresets[i]) || pitchPresets[i] < 0.1 || pitchPresets[i] > 4.0) {
                   pitchPresets[i] = 1.0;
               }
           }
-          Serial.printf("Loaded %s\n", path);
+          Serial.printf("Loaded %s (%d samples)\n", path, recordedLength);
       } else {
           Serial.printf("Error: Partial read from %s\n", path);
       }
@@ -164,19 +201,26 @@ void samplingTask(void *pvParameters) {
     int writeIndex = 0;
 
     while (true) {
-        if (isRecording) {
+        bool localRecording = false;
+        if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+            localRecording = isRecording;
+            xSemaphoreGive(bufferMutex);
+        }
+
+        if (localRecording) {
             // Read whatever is available in the DMA buffer
             esp_err_t err = adc_continuous_read(adc_handle, result_buf, DMA_CHUNK_SIZE, &ret_num, 0);
             if (err == ESP_OK && ret_num > 0) {
                 if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
-                    for (uint32_t i = 0; i < ret_num; i += 2) { // 2 bytes per sample in Type 1
+                    // Type 1 data is exactly 2 bytes per sample on ESP32
+                    for (uint32_t i = 0; i < ret_num; i += SOC_ADC_DIGI_RESULT_BYTES) {
+                        if (i + SOC_ADC_DIGI_RESULT_BYTES > ret_num) break;
                         adc_digi_output_data_t *p = (adc_digi_output_data_t *)&result_buf[i];
                         // Convert 12-bit ADC (unsigned) to 8-bit for our buffer
-                        // Center it around 128 (8-bit mid-range) if ADC is centered around 2048
                         int val = p->type1.data;
-                        val = (val >> 4); // 0-4095 -> 0-255
-                        sampleBuffer[writeIndex] = (uint8_t)val;
+                        sampleBuffer[writeIndex] = (uint8_t)(val >> 4); // 0-4095 -> 0-255
                         writeIndex = (writeIndex + 1) % SAMPLE_BUFFER_SIZE;
+                        if (recordedLength < SAMPLE_BUFFER_SIZE) recordedLength++;
                     }
                     xSemaphoreGive(bufferMutex);
                 }
@@ -208,6 +252,15 @@ void playbackTask(void *pvParameters) {
         if (section != -1) {
             int start = section * SECTION_SIZE;
             int end = start + SECTION_SIZE;
+
+            // Limit playback to recorded region
+            int currentRecorded = 0;
+            if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+                currentRecorded = recordedLength;
+                xSemaphoreGive(bufferMutex);
+            }
+            if (end > currentRecorded) end = currentRecorded;
+
             playIndex = start;
 
             while (true) {
@@ -271,8 +324,8 @@ void setup() {
     if(!LittleFS.begin(true)){ Serial.println("LittleFS Mount Failed"); }
 
     // Initialize DMA Drivers
-    initADC();
-    initDAC();
+    if (!initADC()) { Serial.println("ADC DMA Init Failed"); while(1) delay(10); }
+    if (!initDAC()) { Serial.println("DAC DMA Init Failed"); while(1) delay(10); }
 
     // Create tasks for background I/O
     xTaskCreate(samplingTask, "RecTask", 4096, NULL, 15, NULL);
@@ -299,12 +352,22 @@ void loop() {
             Serial.printf("Preset Speed: %.2f\n", playbackSpeed);
         }
         else if (irValue == IR_SAM_RECORD) {
-          isRecording = !isRecording;
-          if (isRecording) {
-              if (adc_continuous_start(adc_handle) == ESP_OK) Serial.println("Recording...");
-              else { isRecording = false; Serial.println("Failed to start ADC"); }
+          if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+              isRecording = !isRecording;
+              if (isRecording) {
+                  recordedLength = 0; // Reset length for new recording
+                  if (adc_continuous_start(adc_handle) == ESP_OK) {
+                      Serial.println("Recording...");
+                  } else {
+                      isRecording = false;
+                      Serial.println("Failed to start ADC");
+                  }
+              } else {
+                  adc_continuous_stop(adc_handle);
+                  Serial.printf("Stopped. Recorded %d samples.\n", recordedLength);
+              }
+              xSemaphoreGive(bufferMutex);
           }
-          else { adc_continuous_stop(adc_handle); Serial.println("Stopped."); }
         }
         else if (irValue == IR_SAM_STOP) {
             if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {

@@ -26,6 +26,7 @@ typedef uint32_t dac_channel_mask_t;
 #define DAC_CHANNEL_MODE_SIMUL 0
 #define ADC_ATTEN_DB_11 3
 #define ESP_ERR_TIMEOUT 0x107
+#define SOC_ADC_DIGI_RESULT_BYTES 2
 
 typedef struct {
     uint32_t atten;
@@ -125,6 +126,7 @@ void test_full_review() {
     // Test 4: Flash Save/Load
     for(int i=0; i<SAMPLE_BUFFER_SIZE; i++) sampleBuffer[i] = 0;
     sampleBuffer[0] = 128;
+    recordedLength = 1;
 
     set_mock_ir_values({IR_SAM_SOURCE, DIGIT_CODES[9], DIGIT_CODES[9]}); // Save 99
     loop(); loop(); loop();
@@ -137,6 +139,7 @@ void test_full_review() {
     loop(); loop(); loop();
 
     assert(sampleBuffer[0] == 128);
+    assert(recordedLength == 1);
     assert(is_near(pitchPresets[1], 2.0));
     std::cout << "Persistence (Sample + Presets) Verified" << std::endl;
 

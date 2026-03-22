@@ -2,21 +2,34 @@
 #define IRREMOTEESP32_H
 
 #include <stdint.h>
+#include "Arduino.h"
 
-typedef uint64_t decode_type_t;
-#define DECODE_TYP_NEC 1
+#define ENABLE_LED_FEEDBACK true
+#define DISABLE_LED_FEEDBACK false
 
-struct decode_results {
-    decode_type_t decode_type;
-    uint32_t value;
-};
+typedef struct {
+    uint32_t decodedRawData;
+} IRData;
 
-class IRrecv {
+class IrReceiverMock {
 public:
-    IRrecv(int pin) {}
-    void enableIRAM() {}
-    bool decode(decode_results* results);
+    IRData decodedIRData;
+    void begin(int pin, bool feedback) {}
+    bool decode() {
+        if (mock_values.empty()) return false;
+        decodedIRData.decodedRawData = mock_values.front();
+        mock_values.erase(mock_values.begin());
+        return true;
+    }
     void resume() {}
+
+    void set_mock_values(const std::vector<uint32_t>& values) {
+        mock_values = values;
+    }
+private:
+    std::vector<uint32_t> mock_values;
 };
+
+extern IrReceiverMock IrReceiver;
 
 #endif

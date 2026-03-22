@@ -11,21 +11,10 @@ void delay(uint32_t ms) {}
 uint32_t millis() { return 0; }
 int analogRead(int pin) { return 2048; } // Mock value
 
-static std::vector<uint32_t> mock_ir_values;
-static int mock_ir_index = 0;
-
-bool IRrecv::decode(decode_results* results) {
-    if (mock_ir_index < mock_ir_values.size()) {
-        results->value = mock_ir_values[mock_ir_index++];
-        results->decode_type = DECODE_TYP_NEC;
-        return true;
-    }
-    return false;
-}
+IrReceiverMock IrReceiver;
 
 void set_mock_ir_values(const std::vector<uint32_t>& values) {
-    mock_ir_values = values;
-    mock_ir_index = 0;
+    IrReceiver.set_mock_values(values);
 }
 
 esp_err_t dac_output_enable(int channel) { return 0; }

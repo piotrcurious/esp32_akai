@@ -5,6 +5,7 @@
 #include <map>
 #include <vector>
 #include <cstdint>
+#include <cstddef>
 
 class File {
     std::string path;
@@ -13,8 +14,9 @@ public:
     File() : writing(false) {}
     File(std::string p, bool w) : path(p), writing(w) {}
     operator bool() { return !path.empty(); }
-    void write(uint8_t* buf, size_t size);
-    void read(uint8_t* buf, size_t size);
+    size_t write(const uint8_t* buf, size_t size);
+    size_t read(uint8_t* buf, size_t size);
+    size_t size();
     void close() {}
 };
 

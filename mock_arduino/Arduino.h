@@ -12,6 +12,8 @@
 #define LOW  0x0
 #define HEX 16
 
+#include <stdarg.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,6 +43,12 @@ public:
     void begin(int baud) {}
     void print(const char* s) { printf("%s", s); }
     void println(const char* s) { printf("%s\n", s); }
+    void printf(const char* format, ...) {
+        va_list args;
+        va_start(args, format);
+        vprintf(format, args);
+        va_end(args);
+    }
 };
 
 extern SerialMock Serial;

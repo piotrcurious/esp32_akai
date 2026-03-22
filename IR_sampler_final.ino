@@ -135,10 +135,13 @@ void loop() {
           isRecording = !isRecording;
         } else if (results.value == IR_SAM_STOP) {
           activePlaybackSection = -1;
+          Serial.println("ALL STOP");
         } else if (results.value == IR_SAM_P_UP) {
           playbackSpeed += 0.05;
+          Serial.println("Speed UP");
         } else if (results.value == IR_SAM_P_DOWN) {
           playbackSpeed -= 0.05;
+          Serial.println("Speed DOWN");
         } else {
           for (int i = 0; i < SECTIONS; i++) {
             if (results.value == PAD_CODES[i]) { activePlaybackSection = i; break; }

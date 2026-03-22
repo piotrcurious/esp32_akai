@@ -3,36 +3,41 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <LittleFS.h>
 
-// Define pins
+// Pins
 const int IR_RECEIVER_PIN = 18;
 const int DAC_CHANNEL = DAC_CHANNEL1;
 const int AUDIO_INPUT_PIN = 34;
 
-// Audio Configuration (MPC-style: 8 Pads, 32KB buffer)
+// Audio Configuration
 const int SAMPLE_BUFFER_SIZE = 32768;
 const int DEFAULT_SAMPLING_RATE_HZ = 2000;
 const int SECTIONS = 8;
 const int SECTION_SIZE = SAMPLE_BUFFER_SIZE / SECTIONS;
 
-// Samsung DVD / TV IR Codes (32-bit HEX)
-const uint32_t IR_SAM_RECORD = 0xE0E040BF;
-const uint32_t IR_SAM_STOP   = 0xE0E0D02F;
-const uint32_t IR_SAM_P_UP   = 0xE0E0E01F;
-const uint32_t IR_SAM_P_DOWN = 0xE0E0D02E; // Fixed code to avoid collision with Stop
-const uint32_t IR_SAM_PLAY   = 0xE0E010EF;
+// Samsung IR Codes
+const uint32_t IR_SAM_RECORD   = 0xE0E040BF;
+const uint32_t IR_SAM_STOP     = 0xE0E0D02F;
+const uint32_t IR_SAM_P_UP     = 0xE0E0E01F;
+const uint32_t IR_SAM_P_DOWN   = 0xE0E0D02E;
+const uint32_t IR_SAM_SOURCE   = 0xE0E0807F; // Save sequence
+const uint32_t IR_SAM_SUBTITLE = 0xE0E0A45B; // Load sequence
 
-// Pad Mappings (Digits 1-8)
 const uint32_t PAD_CODES[] = {
-  0xE0E020DF, // 1
-  0xE0E0A05F, // 2
-  0xE0E0609F, // 3
-  0xE0E010EF, // 4
-  0xE0E0906F, // 5
-  0xE0E050AF, // 6
-  0xE0E030CF, // 7
-  0xE0E0B04F  // 8
+  0xE0E020DF, 0xE0E0A05F, 0xE0E0609F, 0xE0E010EF,
+  0xE0E0906F, 0xE0E050AF, 0xE0E030CF, 0xE0E0B04F
 };
+
+const uint32_t DIGIT_CODES[] = {
+  0xE0E08877, 0xE0E020DF, 0xE0E0A05F, 0xE0E0609F, 0xE0E010EF,
+  0xE0E0906F, 0xE0E050AF, 0xE0E030CF, 0xE0E0B04F, 0xE0E0708F
+};
+
+// State Machine
+enum IRState { IDLE, WAITING_SAVE_D1, WAITING_SAVE_D2, WAITING_LOAD_D1, WAITING_LOAD_D2 };
+IRState currentIRState = IDLE;
+int selectedFileID = 0;
 
 // Forward Declarations
 void samplingTask(void *pvParameters);
@@ -50,45 +55,101 @@ volatile float playbackSpeed = 1.0;
 
 SemaphoreHandle_t bufferMutex;
 
+void saveSample(int id) {
+  char path[16];
+  sprintf(path, "/s%02d.bin", id);
+  Serial.print("Saving to "); Serial.println(path);
+  if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+    File f = LittleFS.open(path, "w");
+    if (f) {
+      f.write(sampleBuffer, SAMPLE_BUFFER_SIZE);
+      f.close();
+      Serial.println("Saved!");
+    }
+    xSemaphoreGive(bufferMutex);
+  }
+}
+
+void loadSample(int id) {
+  char path[16];
+  sprintf(path, "/s%02d.bin", id);
+  Serial.print("Loading from "); Serial.println(path);
+  if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+    File f = LittleFS.open(path, "r");
+    if (f) {
+      f.read(sampleBuffer, SAMPLE_BUFFER_SIZE);
+      f.close();
+      Serial.println("Loaded!");
+    }
+    xSemaphoreGive(bufferMutex);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   irrecv.enableIRAM();
   dac_output_enable(DAC_CHANNEL);
   bufferMutex = xSemaphoreCreateMutex();
 
+  if(!LittleFS.begin(true)){
+    Serial.println("LittleFS Mount Failed");
+  }
+
   xTaskCreate(samplingTask, "SamplingTask", 4096, NULL, 15, NULL);
   xTaskCreate(playbackTask, "PlaybackTask", 4096, NULL, 15, NULL);
 
-  Serial.println("MPC Sampler Ready - Samsung DVD Mapping");
+  Serial.println("MPC Sampler + Flash Ready");
+}
+
+int getDigit(uint32_t code) {
+  for (int i=0; i<10; i++) if (code == DIGIT_CODES[i]) return i;
+  return -1;
 }
 
 void loop() {
   if (irrecv.decode(&results)) {
-    Serial.print("IR Code: ");
-    Serial.println(String(results.value, HEX).c_str());
+    int digit = getDigit(results.value);
 
-    if (results.value == IR_SAM_RECORD) {
-      isRecording = !isRecording;
-      Serial.println(isRecording ? "REC ENABLED" : "REC DISABLED");
-    } else if (results.value == IR_SAM_STOP) {
-      activePlaybackSection = -1;
-      Serial.println("ALL STOP");
-    } else if (results.value == IR_SAM_P_UP) {
-      playbackSpeed += 0.05;
-      if (playbackSpeed > 3.0) playbackSpeed = 3.0;
-      Serial.println("Speed UP");
-    } else if (results.value == IR_SAM_P_DOWN) {
-      playbackSpeed -= 0.05;
-      if (playbackSpeed < 0.2) playbackSpeed = 0.2;
-      Serial.println("Speed DOWN");
-    } else {
-      for (int i = 0; i < SECTIONS; i++) {
-        if (results.value == PAD_CODES[i]) {
-          activePlaybackSection = i;
-          Serial.println("TRIG PAD");
-          break;
+    switch(currentIRState) {
+      case IDLE:
+        if (results.value == IR_SAM_SOURCE) {
+          currentIRState = WAITING_SAVE_D1;
+          Serial.println("SAVE MODE: Digit 1?");
+        } else if (results.value == IR_SAM_SUBTITLE) {
+          currentIRState = WAITING_LOAD_D1;
+          Serial.println("LOAD MODE: Digit 1?");
+        } else if (results.value == IR_SAM_RECORD) {
+          isRecording = !isRecording;
+        } else if (results.value == IR_SAM_STOP) {
+          activePlaybackSection = -1;
+        } else if (results.value == IR_SAM_P_UP) {
+          playbackSpeed += 0.05;
+        } else if (results.value == IR_SAM_P_DOWN) {
+          playbackSpeed -= 0.05;
+        } else {
+          for (int i = 0; i < SECTIONS; i++) {
+            if (results.value == PAD_CODES[i]) { activePlaybackSection = i; break; }
+          }
         }
-      }
+        break;
+
+      case WAITING_SAVE_D1:
+        if (digit != -1) { selectedFileID = digit * 10; currentIRState = WAITING_SAVE_D2; }
+        else currentIRState = IDLE;
+        break;
+      case WAITING_SAVE_D2:
+        if (digit != -1) { selectedFileID += digit; saveSample(selectedFileID); }
+        currentIRState = IDLE;
+        break;
+
+      case WAITING_LOAD_D1:
+        if (digit != -1) { selectedFileID = digit * 10; currentIRState = WAITING_LOAD_D2; }
+        else currentIRState = IDLE;
+        break;
+      case WAITING_LOAD_D2:
+        if (digit != -1) { selectedFileID += digit; loadSample(selectedFileID); }
+        currentIRState = IDLE;
+        break;
     }
     irrecv.resume();
   }

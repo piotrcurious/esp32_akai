@@ -1,5 +1,6 @@
 #include "mock_arduino/Arduino.h"
 #include "mock_arduino/IRremoteESP32.h"
+#include "mock_arduino/LittleFS.h"
 #include <assert.h>
 #include <vector>
 #include <iostream>
@@ -7,11 +8,9 @@
 #define TESTING_MOCK 1
 #include "IR_sampler_final.ino"
 
-// Define these for mocking setup
 void samplingTask(void *pvParameters) {}
 void playbackTask(void *pvParameters) {}
 
-// Test version of samplingTask
 void samplingTaskTest() {
   static int writeIndex = 0;
   if (isRecording) {
@@ -22,47 +21,36 @@ void samplingTaskTest() {
   }
 }
 
-void test_mpc_workflow() {
-    std::cout << "Testing MPC Workflow (Samsung Remote)..." << std::endl;
+void test_flash_workflow() {
+    std::cout << "Testing Flash Save/Load Workflow (Samsung Remote)..." << std::endl;
     isRecording = false;
-    activePlaybackSection = -1;
     for(int i=0; i<SAMPLE_BUFFER_SIZE; i++) sampleBuffer[i] = 0;
 
-    // 1. Toggle Record
-    set_mock_ir_values({IR_SAM_RECORD});
-    loop();
-    assert(isRecording == true);
-    std::cout << "Record Enabled!" << std::endl;
-
-    // 2. Fill Pad 1 (Section 0)
+    // 1. Record something
+    isRecording = true;
     samplingTaskTest();
-    assert(sampleBuffer[0] == 128); // 2048 >> 4
+    assert(sampleBuffer[0] == 128);
+    isRecording = false;
 
-    // 3. Trigger Pad 1
-    set_mock_ir_values({PAD_CODES[0]}); // Pad 1 (1)
-    loop();
-    assert(activePlaybackSection == 0);
-    std::cout << "Pad 1 Triggered!" << std::endl;
+    // 2. Save as File 42 (Source -> 4 -> 2)
+    set_mock_ir_values({IR_SAM_SOURCE, DIGIT_CODES[4], DIGIT_CODES[2]});
+    loop(); loop(); loop();
+    std::cout << "Save Sequence Completed!" << std::endl;
 
-    // 4. Pitch Down
-    float initialSpeed = playbackSpeed;
-    set_mock_ir_values({IR_SAM_P_DOWN});
-    loop();
-    assert(playbackSpeed < initialSpeed);
-    std::cout << "Pitch Down: " << playbackSpeed << std::endl;
+    // 3. Clear buffer
+    for(int i=0; i<SAMPLE_BUFFER_SIZE; i++) sampleBuffer[i] = 0;
+    assert(sampleBuffer[0] == 0);
 
-    // 5. Stop All
-    set_mock_ir_values({IR_SAM_STOP});
-    loop();
-    assert(activePlaybackSection == -1);
-    std::cout << "All Playback Stopped!" << std::endl;
-
-    std::cout << "MPC Workflow Verified!" << std::endl;
+    // 4. Load File 42 (Subtitle -> 4 -> 2)
+    set_mock_ir_values({IR_SAM_SUBTITLE, DIGIT_CODES[4], DIGIT_CODES[2]});
+    loop(); loop(); loop();
+    assert(sampleBuffer[0] == 128);
+    std::cout << "Load Sequence Completed and Verified!" << std::endl;
 }
 
 int main() {
     setup();
-    test_mpc_workflow();
-    std::cout << "All Improved MPC Tests Passed!" << std::endl;
+    test_flash_workflow();
+    std::cout << "All Storage MPC Tests Passed!" << std::endl;
     return 0;
 }

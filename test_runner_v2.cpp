@@ -25,6 +25,7 @@ typedef uint32_t dac_channel_mask_t;
 #define DAC_DIGI_CLK_SRC_DEFAULT 0
 #define DAC_CHANNEL_MODE_SIMUL 0
 #define ADC_ATTEN_DB_11 3
+#define ESP_ERR_TIMEOUT 0x107
 
 typedef struct {
     uint32_t atten;

@@ -50,15 +50,12 @@ const uint32_t DIGIT_CODES[] = {
 uint8_t sampleBuffer[SAMPLE_BUFFER_SIZE];
 volatile bool isRecording = false;
 volatile int activePlaybackSection = -1;
-volatile float playbackSpeed = 1.0;
+float playbackSpeed = 1.0;
 float pitchPresets[4] = { 1.0, 1.0, 1.0, 1.0 };
 
 SemaphoreHandle_t bufferMutex;
 dac_continuous_handle_t dac_handle = NULL;
 adc_continuous_handle_t adc_handle = NULL;
-
-IRrecv irrecv(IR_RECEIVER_PIN);
-decode_results results;
 
 enum IRState { IDLE, WAITING_SAVE_D1, WAITING_SAVE_D2, WAITING_LOAD_D1, WAITING_LOAD_D2 };
 IRState currentIRState = IDLE;
@@ -111,10 +108,16 @@ void saveSample(int id) {
   if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
     File f = LittleFS.open(path, "w");
     if (f) {
-      f.write(sampleBuffer, SAMPLE_BUFFER_SIZE);
-      f.write((uint8_t*)pitchPresets, sizeof(pitchPresets));
+      size_t written_audio = f.write(sampleBuffer, SAMPLE_BUFFER_SIZE);
+      size_t written_presets = f.write((uint8_t*)pitchPresets, sizeof(pitchPresets));
       f.close();
-      Serial.printf("Saved %s\n", path);
+      if (written_audio == SAMPLE_BUFFER_SIZE && written_presets == sizeof(pitchPresets)) {
+          Serial.printf("Saved %s\n", path);
+      } else {
+          Serial.printf("Error: Partial write to %s\n", path);
+      }
+    } else {
+        Serial.printf("Error: Failed to open %s for writing\n", path);
     }
     xSemaphoreGive(bufferMutex);
   }
@@ -125,10 +128,28 @@ void loadSample(int id) {
   if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
     File f = LittleFS.open(path, "r");
     if (f) {
-      f.read(sampleBuffer, SAMPLE_BUFFER_SIZE);
-      f.read((uint8_t*)pitchPresets, sizeof(pitchPresets));
+      if (f.size() < (SAMPLE_BUFFER_SIZE + sizeof(pitchPresets))) {
+          Serial.printf("Error: File %s is too small\n", path);
+          f.close();
+          xSemaphoreGive(bufferMutex);
+          return;
+      }
+      size_t read_audio = f.read(sampleBuffer, SAMPLE_BUFFER_SIZE);
+      size_t read_presets = f.read((uint8_t*)pitchPresets, sizeof(pitchPresets));
       f.close();
-      Serial.printf("Loaded %s\n", path);
+      if (read_audio == SAMPLE_BUFFER_SIZE && read_presets == sizeof(pitchPresets)) {
+          // Basic validation for presets
+          for (int i=0; i<4; i++) {
+              if (std::isnan(pitchPresets[i]) || pitchPresets[i] < 0.1 || pitchPresets[i] > 4.0) {
+                  pitchPresets[i] = 1.0;
+              }
+          }
+          Serial.printf("Loaded %s\n", path);
+      } else {
+          Serial.printf("Error: Partial read from %s\n", path);
+      }
+    } else {
+        Serial.printf("Error: File %s not found\n", path);
     }
     xSemaphoreGive(bufferMutex);
   }
@@ -148,14 +169,21 @@ void samplingTask(void *pvParameters) {
             esp_err_t err = adc_continuous_read(adc_handle, result_buf, DMA_CHUNK_SIZE, &ret_num, 0);
             if (err == ESP_OK && ret_num > 0) {
                 if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
-                    for (int i = 0; i < (int)ret_num; i += 2) { // 2 bytes per sample in Type 1
+                    for (uint32_t i = 0; i < ret_num; i += 2) { // 2 bytes per sample in Type 1
                         adc_digi_output_data_t *p = (adc_digi_output_data_t *)&result_buf[i];
-                        // Convert 12-bit ADC to 8-bit for our buffer
-                        sampleBuffer[writeIndex] = (uint8_t)(p->type1.data >> 4);
+                        // Convert 12-bit ADC (unsigned) to 8-bit for our buffer
+                        // Center it around 128 (8-bit mid-range) if ADC is centered around 2048
+                        int val = p->type1.data;
+                        val = (val >> 4); // 0-4095 -> 0-255
+                        sampleBuffer[writeIndex] = (uint8_t)val;
                         writeIndex = (writeIndex + 1) % SAMPLE_BUFFER_SIZE;
                     }
                     xSemaphoreGive(bufferMutex);
                 }
+            } else if (err == ESP_ERR_TIMEOUT) {
+                // No data yet, just wait
+            } else {
+                Serial.printf("ADC Error: 0x%x\n", err);
             }
             vTaskDelay(1);
         } else {
@@ -171,32 +199,62 @@ void playbackTask(void *pvParameters) {
     float playIndex = 0;
 
     while (true) {
-        if (activePlaybackSection != -1) {
-            int section = activePlaybackSection;
+        int section = -1;
+        if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+            section = activePlaybackSection;
+            xSemaphoreGive(bufferMutex);
+        }
+
+        if (section != -1) {
             int start = section * SECTION_SIZE;
             int end = start + SECTION_SIZE;
             playIndex = start;
 
-            while (activePlaybackSection == section && playIndex < end) {
+            while (true) {
                 int to_fill = 0;
-                // Resample from main buffer to DMA chunk
-                for (int i = 0; i < DMA_CHUNK_SIZE; i++) {
-                    int idx = (int)playIndex;
-                    if (idx >= SAMPLE_BUFFER_SIZE || playIndex >= end) break;
-                    dma_write_buf[i] = sampleBuffer[idx];
-                    playIndex += playbackSpeed;
-                    to_fill++;
+                float currentSpeed = 1.0;
+
+                if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+                    // Check if playback was stopped or changed by another task
+                    if (activePlaybackSection != section) {
+                        xSemaphoreGive(bufferMutex);
+                        break;
+                    }
+                    currentSpeed = playbackSpeed;
+                    // Resample from main buffer to DMA chunk with linear interpolation
+                    for (int i = 0; i < DMA_CHUNK_SIZE; i++) {
+                        if (playIndex >= (float)end) break;
+
+                        int idx1 = (int)playIndex;
+                        int idx2 = (idx1 + 1);
+                        if (idx2 >= end) idx2 = idx1; // Boundary check
+
+                        float frac = playIndex - (float)idx1;
+                        uint8_t s1 = sampleBuffer[idx1 % SAMPLE_BUFFER_SIZE];
+                        uint8_t s2 = sampleBuffer[idx2 % SAMPLE_BUFFER_SIZE];
+
+                        dma_write_buf[i] = (uint8_t)((1.0f - frac) * s1 + frac * s2);
+
+                        playIndex += currentSpeed;
+                        to_fill++;
+                    }
+                    xSemaphoreGive(bufferMutex);
                 }
 
                 if (to_fill > 0) {
                     size_t written = 0;
                     // Blocks until there is space in DMA queue
                     dac_continuous_write(dac_handle, dma_write_buf, to_fill, &written, portMAX_DELAY);
-                } else {
-                    break;
                 }
+
+                if (playIndex >= (float)end) break;
             }
-            if (activePlaybackSection == section) activePlaybackSection = -1;
+
+            // Set section to idle only if it wasn't changed to another section or stop (-1)
+            if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+                if (activePlaybackSection == section) activePlaybackSection = -1;
+                xSemaphoreGive(bufferMutex);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -208,7 +266,7 @@ int getColor(uint32_t code) { for (int i=0; i<4; i++) if (code == COLOR_CODES[i]
 
 void setup() {
     Serial.begin(115200);
-    irrecv.enableIRAM();
+    IrReceiver.begin(IR_RECEIVER_PIN, ENABLE_LED_FEEDBACK);
     bufferMutex = xSemaphoreCreateMutex();
     if(!LittleFS.begin(true)){ Serial.println("LittleFS Mount Failed"); }
 
@@ -224,26 +282,63 @@ void setup() {
 }
 
 void loop() {
-  if (irrecv.decode(&results)) {
-    int digit = getDigit(results.value);
-    int color = getColor(results.value);
+  if (IrReceiver.decode()) {
+    uint32_t irValue = IrReceiver.decodedIRData.decodedRawData;
+    int digit = getDigit(irValue);
+    int color = getColor(irValue);
 
     switch(currentIRState) {
       case IDLE:
-        if (results.value == IR_SAM_SOURCE) { currentIRState = WAITING_SAVE_D1; Serial.println("Save mode: Select Digit (00-99) or Color (Preset)"); }
-        else if (results.value == IR_SAM_SUBTITLE) { currentIRState = WAITING_LOAD_D1; Serial.println("Load mode: Select Digit (00-99)"); }
-        else if (color != -1) { playbackSpeed = pitchPresets[color]; Serial.printf("Preset Speed: %.2f\n", playbackSpeed); }
-        else if (results.value == IR_SAM_RECORD) {
+        if (irValue == IR_SAM_SOURCE) { currentIRState = WAITING_SAVE_D1; Serial.println("Save mode: Select Digit (00-99) or Color (Preset)"); }
+        else if (irValue == IR_SAM_SUBTITLE) { currentIRState = WAITING_LOAD_D1; Serial.println("Load mode: Select Digit (00-99)"); }
+        else if (color != -1) {
+            if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+                playbackSpeed = pitchPresets[color];
+                xSemaphoreGive(bufferMutex);
+            }
+            Serial.printf("Preset Speed: %.2f\n", playbackSpeed);
+        }
+        else if (irValue == IR_SAM_RECORD) {
           isRecording = !isRecording;
-          if (isRecording) { adc_continuous_start(adc_handle); Serial.println("Recording..."); }
+          if (isRecording) {
+              if (adc_continuous_start(adc_handle) == ESP_OK) Serial.println("Recording...");
+              else { isRecording = false; Serial.println("Failed to start ADC"); }
+          }
           else { adc_continuous_stop(adc_handle); Serial.println("Stopped."); }
         }
-        else if (results.value == IR_SAM_STOP) { activePlaybackSection = -1; Serial.println("All Stop"); }
-        else if (results.value == IR_SAM_P_UP) { playbackSpeed += 0.05; Serial.printf("Speed: %.2f\n", playbackSpeed); }
-        else if (results.value == IR_SAM_P_DOWN) { playbackSpeed -= 0.05; Serial.printf("Speed: %.2f\n", playbackSpeed); }
+        else if (irValue == IR_SAM_STOP) {
+            if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+                activePlaybackSection = -1;
+                xSemaphoreGive(bufferMutex);
+            }
+            Serial.println("All Stop");
+        }
+        else if (irValue == IR_SAM_P_UP) {
+            if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+                playbackSpeed += 0.05;
+                if (playbackSpeed > 4.0) playbackSpeed = 4.0;
+                xSemaphoreGive(bufferMutex);
+            }
+            Serial.printf("Speed: %.2f\n", playbackSpeed);
+        }
+        else if (irValue == IR_SAM_P_DOWN) {
+            if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+                playbackSpeed -= 0.05;
+                if (playbackSpeed < 0.1) playbackSpeed = 0.1;
+                xSemaphoreGive(bufferMutex);
+            }
+            Serial.printf("Speed: %.2f\n", playbackSpeed);
+        }
         else {
           for (int i = 0; i < SECTIONS; i++) {
-            if (results.value == PAD_CODES[i]) { activePlaybackSection = i; Serial.printf("Playing Pad %d\n", i); break; }
+            if (irValue == PAD_CODES[i]) {
+                if (xSemaphoreTake(bufferMutex, portMAX_DELAY)) {
+                    activePlaybackSection = i;
+                    xSemaphoreGive(bufferMutex);
+                }
+                Serial.printf("Playing Pad %d\n", i);
+                break;
+            }
           }
         }
         break;
@@ -266,6 +361,6 @@ void loop() {
         currentIRState = IDLE;
         break;
     }
-    irrecv.resume();
+    IrReceiver.resume();
   }
 }

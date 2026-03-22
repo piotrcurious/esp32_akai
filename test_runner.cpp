@@ -7,6 +7,10 @@
 #define TESTING_MOCK 1
 #include "IR_sampler_final.ino"
 
+// Define these for mocking setup
+void samplingTask(void *pvParameters) {}
+void playbackTask(void *pvParameters) {}
+
 // Test version of samplingTask
 void samplingTaskTest() {
   static int writeIndex = 0;
@@ -18,39 +22,47 @@ void samplingTaskTest() {
   }
 }
 
-void test_recording_and_content() {
-    std::cout << "Testing Recording and Content..." << std::endl;
+void test_mpc_workflow() {
+    std::cout << "Testing MPC Workflow (Samsung Remote)..." << std::endl;
     isRecording = false;
+    activePlaybackSection = -1;
     for(int i=0; i<SAMPLE_BUFFER_SIZE; i++) sampleBuffer[i] = 0;
 
-    set_mock_ir_values({IR_RECORD});
+    // 1. Toggle Record
+    set_mock_ir_values({IR_SAM_RECORD});
     loop();
     assert(isRecording == true);
+    std::cout << "Record Enabled!" << std::endl;
 
-    // Run test sampling task
+    // 2. Fill Pad 1 (Section 0)
     samplingTaskTest();
-
     assert(sampleBuffer[0] == 128); // 2048 >> 4
 
-    set_mock_ir_values({IR_RECORD});
-    loop();
-    assert(isRecording == false);
-    std::cout << "Recording Content Verified!" << std::endl;
-}
-
-void test_playback_trigger() {
-    std::cout << "Testing Playback Trigger..." << std::endl;
-    activePlaybackSection = -1;
-    set_mock_ir_values({0xFF30CF}); // IR_PLAY_1
+    // 3. Trigger Pad 1
+    set_mock_ir_values({PAD_CODES[0]}); // Pad 1 (1)
     loop();
     assert(activePlaybackSection == 0);
-    std::cout << "Playback Triggered for Section 0!" << std::endl;
+    std::cout << "Pad 1 Triggered!" << std::endl;
+
+    // 4. Pitch Down
+    float initialSpeed = playbackSpeed;
+    set_mock_ir_values({IR_SAM_P_DOWN});
+    loop();
+    assert(playbackSpeed < initialSpeed);
+    std::cout << "Pitch Down: " << playbackSpeed << std::endl;
+
+    // 5. Stop All
+    set_mock_ir_values({IR_SAM_STOP});
+    loop();
+    assert(activePlaybackSection == -1);
+    std::cout << "All Playback Stopped!" << std::endl;
+
+    std::cout << "MPC Workflow Verified!" << std::endl;
 }
 
 int main() {
     setup();
-    test_recording_and_content();
-    test_playback_trigger();
-    std::cout << "All Improved Tests Passed!" << std::endl;
+    test_mpc_workflow();
+    std::cout << "All Improved MPC Tests Passed!" << std::endl;
     return 0;
 }

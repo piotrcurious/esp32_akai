@@ -9,14 +9,34 @@ const int IR_RECEIVER_PIN = 18;
 const int DAC_CHANNEL = DAC_CHANNEL1;
 const int AUDIO_INPUT_PIN = 34;
 
-// Audio Configuration
-const int SAMPLE_BUFFER_SIZE = 8192;
-const int DEFAULT_SAMPLING_RATE_HZ = 1000;
+// Audio Configuration (MPC-style: 8 Pads, 32KB buffer)
+const int SAMPLE_BUFFER_SIZE = 32768;
+const int DEFAULT_SAMPLING_RATE_HZ = 2000;
 const int SECTIONS = 8;
 const int SECTION_SIZE = SAMPLE_BUFFER_SIZE / SECTIONS;
 
-// IR Codes
-const uint32_t IR_RECORD = 0xFFA25D;
+// Samsung DVD / TV IR Codes (32-bit HEX)
+const uint32_t IR_SAM_RECORD = 0xE0E040BF;
+const uint32_t IR_SAM_STOP   = 0xE0E0D02F;
+const uint32_t IR_SAM_P_UP   = 0xE0E0E01F;
+const uint32_t IR_SAM_P_DOWN = 0xE0E0D02E; // Fixed code to avoid collision with Stop
+const uint32_t IR_SAM_PLAY   = 0xE0E010EF;
+
+// Pad Mappings (Digits 1-8)
+const uint32_t PAD_CODES[] = {
+  0xE0E020DF, // 1
+  0xE0E0A05F, // 2
+  0xE0E0609F, // 3
+  0xE0E010EF, // 4
+  0xE0E0906F, // 5
+  0xE0E050AF, // 6
+  0xE0E030CF, // 7
+  0xE0E0B04F  // 8
+};
+
+// Forward Declarations
+void samplingTask(void *pvParameters);
+void playbackTask(void *pvParameters);
 
 // IR library
 IRrecv irrecv(IR_RECEIVER_PIN);
@@ -35,17 +55,37 @@ void setup() {
   irrecv.enableIRAM();
   dac_output_enable(DAC_CHANNEL);
   bufferMutex = xSemaphoreCreateMutex();
+
+  xTaskCreate(samplingTask, "SamplingTask", 4096, NULL, 15, NULL);
+  xTaskCreate(playbackTask, "PlaybackTask", 4096, NULL, 15, NULL);
+
+  Serial.println("MPC Sampler Ready - Samsung DVD Mapping");
 }
 
 void loop() {
   if (irrecv.decode(&results)) {
-    if (results.value == IR_RECORD) {
+    Serial.print("IR Code: ");
+    Serial.println(String(results.value, HEX).c_str());
+
+    if (results.value == IR_SAM_RECORD) {
       isRecording = !isRecording;
+      Serial.println(isRecording ? "REC ENABLED" : "REC DISABLED");
+    } else if (results.value == IR_SAM_STOP) {
+      activePlaybackSection = -1;
+      Serial.println("ALL STOP");
+    } else if (results.value == IR_SAM_P_UP) {
+      playbackSpeed += 0.05;
+      if (playbackSpeed > 3.0) playbackSpeed = 3.0;
+      Serial.println("Speed UP");
+    } else if (results.value == IR_SAM_P_DOWN) {
+      playbackSpeed -= 0.05;
+      if (playbackSpeed < 0.2) playbackSpeed = 0.2;
+      Serial.println("Speed DOWN");
     } else {
-      uint32_t playCodes[] = {0xFF30CF, 0xFF18E7, 0xFF7A85, 0xFF10EF, 0xFF38C7, 0xFF5AA5, 0xFF42BD, 0xFF4AB5};
       for (int i = 0; i < SECTIONS; i++) {
-        if (results.value == playCodes[i]) {
+        if (results.value == PAD_CODES[i]) {
           activePlaybackSection = i;
+          Serial.println("TRIG PAD");
           break;
         }
       }
@@ -54,7 +94,6 @@ void loop() {
   }
 }
 
-// Actual tasks for ESP32
 #ifndef TESTING_MOCK
 void samplingTask(void *pvParameters) {
   int writeIndex = 0;

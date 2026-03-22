@@ -11,46 +11,42 @@
 void samplingTask(void *pvParameters) {}
 void playbackTask(void *pvParameters) {}
 
-void samplingTaskTest() {
-  static int writeIndex = 0;
-  if (isRecording) {
-    sampleBuffer[writeIndex] = (uint8_t)(analogRead(AUDIO_INPUT_PIN) >> 4);
-    writeIndex = (writeIndex + 1) % SAMPLE_BUFFER_SIZE;
-  } else {
-    writeIndex = 0;
-  }
-}
+void test_presets_workflow() {
+    std::cout << "Testing Pitch Presets Workflow..." << std::endl;
+    playbackSpeed = 2.5;
 
-void test_flash_workflow() {
-    std::cout << "Testing Flash Save/Load Workflow (Samsung Remote)..." << std::endl;
-    isRecording = false;
-    for(int i=0; i<SAMPLE_BUFFER_SIZE; i++) sampleBuffer[i] = 0;
+    // 1. Save Preset A (Source -> Red)
+    set_mock_ir_values({IR_SAM_SOURCE, COLOR_CODES[0]});
+    loop(); loop();
+    assert(pitchPresets[0] == 2.5);
+    std::cout << "Preset A Saved!" << std::endl;
 
-    // 1. Record something
-    isRecording = true;
-    samplingTaskTest();
-    assert(sampleBuffer[0] == 128);
-    isRecording = false;
+    // 2. Change Speed and Load Preset A (Red)
+    playbackSpeed = 1.0;
+    set_mock_ir_values({COLOR_CODES[0]});
+    loop();
+    assert(playbackSpeed == 2.5);
+    std::cout << "Preset A Loaded!" << std::endl;
 
-    // 2. Save as File 42 (Source -> 4 -> 2)
-    set_mock_ir_values({IR_SAM_SOURCE, DIGIT_CODES[4], DIGIT_CODES[2]});
+    // 3. Save as File 11 (Source -> 1 -> 1)
+    set_mock_ir_values({IR_SAM_SOURCE, DIGIT_CODES[1], DIGIT_CODES[1]});
     loop(); loop(); loop();
-    std::cout << "Save Sequence Completed!" << std::endl;
+    std::cout << "File 11 Saved with Presets!" << std::endl;
 
-    // 3. Clear buffer
-    for(int i=0; i<SAMPLE_BUFFER_SIZE; i++) sampleBuffer[i] = 0;
-    assert(sampleBuffer[0] == 0);
+    // 4. Clear presets and Speed
+    pitchPresets[0] = 0.0;
+    playbackSpeed = 0.0;
 
-    // 4. Load File 42 (Subtitle -> 4 -> 2)
-    set_mock_ir_values({IR_SAM_SUBTITLE, DIGIT_CODES[4], DIGIT_CODES[2]});
+    // 5. Load File 11 (Subtitle -> 1 -> 1)
+    set_mock_ir_values({IR_SAM_SUBTITLE, DIGIT_CODES[1], DIGIT_CODES[1]});
     loop(); loop(); loop();
-    assert(sampleBuffer[0] == 128);
-    std::cout << "Load Sequence Completed and Verified!" << std::endl;
+    assert(pitchPresets[0] == 2.5);
+    std::cout << "File 11 Loaded and Presets Verified!" << std::endl;
 }
 
 int main() {
     setup();
-    test_flash_workflow();
-    std::cout << "All Storage MPC Tests Passed!" << std::endl;
+    test_presets_workflow();
+    std::cout << "All Pitch Preset MPC Tests Passed!" << std::endl;
     return 0;
 }

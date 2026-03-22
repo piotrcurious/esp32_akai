@@ -21,8 +21,11 @@ const uint32_t IR_SAM_RECORD   = 0xE0E040BF;
 const uint32_t IR_SAM_STOP     = 0xE0E0D02F;
 const uint32_t IR_SAM_P_UP     = 0xE0E0E01F;
 const uint32_t IR_SAM_P_DOWN   = 0xE0E0D02E;
-const uint32_t IR_SAM_SOURCE   = 0xE0E0807F; // Save sequence
-const uint32_t IR_SAM_SUBTITLE = 0xE0E0A45B; // Load sequence
+const uint32_t IR_SAM_SOURCE   = 0xE0E0807F;
+const uint32_t IR_SAM_SUBTITLE = 0xE0E0A45B;
+
+// Color Codes (A, B, C, D)
+const uint32_t COLOR_CODES[] = { 0xE0E036C9, 0xE0E028D7, 0xE0E0A857, 0xE0E06897 };
 
 const uint32_t PAD_CODES[] = {
   0xE0E020DF, 0xE0E0A05F, 0xE0E0609F, 0xE0E010EF,
@@ -38,6 +41,9 @@ const uint32_t DIGIT_CODES[] = {
 enum IRState { IDLE, WAITING_SAVE_D1, WAITING_SAVE_D2, WAITING_LOAD_D1, WAITING_LOAD_D2 };
 IRState currentIRState = IDLE;
 int selectedFileID = 0;
+
+// Pitch Presets
+float pitchPresets[4] = { 1.0, 1.0, 1.0, 1.0 };
 
 // Forward Declarations
 void samplingTask(void *pvParameters);
@@ -63,6 +69,7 @@ void saveSample(int id) {
     File f = LittleFS.open(path, "w");
     if (f) {
       f.write(sampleBuffer, SAMPLE_BUFFER_SIZE);
+      f.write((uint8_t*)pitchPresets, sizeof(pitchPresets));
       f.close();
       Serial.println("Saved!");
     }
@@ -78,6 +85,7 @@ void loadSample(int id) {
     File f = LittleFS.open(path, "r");
     if (f) {
       f.read(sampleBuffer, SAMPLE_BUFFER_SIZE);
+      f.read((uint8_t*)pitchPresets, sizeof(pitchPresets));
       f.close();
       Serial.println("Loaded!");
     }
@@ -91,14 +99,11 @@ void setup() {
   dac_output_enable(DAC_CHANNEL);
   bufferMutex = xSemaphoreCreateMutex();
 
-  if(!LittleFS.begin(true)){
-    Serial.println("LittleFS Mount Failed");
-  }
+  if(!LittleFS.begin(true)){ Serial.println("LittleFS Mount Failed"); }
 
   xTaskCreate(samplingTask, "SamplingTask", 4096, NULL, 15, NULL);
   xTaskCreate(playbackTask, "PlaybackTask", 4096, NULL, 15, NULL);
-
-  Serial.println("MPC Sampler + Flash Ready");
+  Serial.println("MPC Sampler + Flash + Pitch Presets Ready");
 }
 
 int getDigit(uint32_t code) {
@@ -106,18 +111,26 @@ int getDigit(uint32_t code) {
   return -1;
 }
 
+int getColor(uint32_t code) {
+  for (int i=0; i<4; i++) if (code == COLOR_CODES[i]) return i;
+  return -1;
+}
+
 void loop() {
   if (irrecv.decode(&results)) {
     int digit = getDigit(results.value);
+    int color = getColor(results.value);
 
     switch(currentIRState) {
       case IDLE:
         if (results.value == IR_SAM_SOURCE) {
           currentIRState = WAITING_SAVE_D1;
-          Serial.println("SAVE MODE: Digit 1?");
+          Serial.println("SOURCE -> Digit/Color?");
         } else if (results.value == IR_SAM_SUBTITLE) {
           currentIRState = WAITING_LOAD_D1;
-          Serial.println("LOAD MODE: Digit 1?");
+        } else if (color != -1) {
+          playbackSpeed = pitchPresets[color];
+          Serial.println("Loaded Preset");
         } else if (results.value == IR_SAM_RECORD) {
           isRecording = !isRecording;
         } else if (results.value == IR_SAM_STOP) {
@@ -134,9 +147,16 @@ void loop() {
         break;
 
       case WAITING_SAVE_D1:
-        if (digit != -1) { selectedFileID = digit * 10; currentIRState = WAITING_SAVE_D2; }
-        else currentIRState = IDLE;
+        if (color != -1) {
+          pitchPresets[color] = playbackSpeed;
+          Serial.println("Saved Preset");
+          currentIRState = IDLE;
+        } else if (digit != -1) {
+          selectedFileID = digit * 10;
+          currentIRState = WAITING_SAVE_D2;
+        } else currentIRState = IDLE;
         break;
+
       case WAITING_SAVE_D2:
         if (digit != -1) { selectedFileID += digit; saveSample(selectedFileID); }
         currentIRState = IDLE;

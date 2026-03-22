@@ -27,18 +27,20 @@ typedef uint32_t dac_channel_mask_t;
 #define ADC_ATTEN_DB_11 3
 
 typedef struct {
+    uint32_t atten;
+    uint32_t channel;
+    uint32_t unit;
+    uint32_t bit_width;
+} adc_digi_pattern_config_t;
+
+typedef struct {
     uint32_t max_store_buf_size;
     uint32_t conv_frame_size;
 } adc_continuous_handle_cfg_t;
 
 typedef struct {
     uint32_t pattern_num;
-    struct {
-        uint32_t atten;
-        uint32_t channel;
-        uint32_t unit;
-        uint32_t bit_width;
-    } adc_pattern[1];
+    adc_digi_pattern_config_t *adc_pattern;
     uint32_t sample_freq_hz;
     uint32_t conv_mode;
     uint32_t format;
@@ -75,6 +77,7 @@ esp_err_t adc_continuous_read(adc_continuous_handle_t handle, uint8_t *buf, uint
 
 esp_err_t dac_continuous_new_channels(dac_continuous_config_t *cfg, dac_continuous_handle_t *ret_handle) { return ESP_OK; }
 esp_err_t dac_continuous_enable(dac_continuous_handle_t handle) { return ESP_OK; }
+esp_err_t dac_continuous_start(dac_continuous_handle_t handle) { return ESP_OK; }
 esp_err_t dac_continuous_write(dac_continuous_handle_t handle, uint8_t *buf, uint32_t length, size_t *out_length, uint32_t timeout_ms) {
     *out_length = length;
     return ESP_OK;
@@ -84,15 +87,12 @@ esp_err_t dac_continuous_write(dac_continuous_handle_t handle, uint8_t *buf, uin
 
 #include "IR_sampler_v2_dma.ino"
 
-// These are already in IR_sampler_v2_dma.ino, we don't need to redefine them here
-// unless we want to override them.
-
 bool is_near(float a, float b) {
     return std::abs(a - b) < 0.0001;
 }
 
 void test_full_review() {
-    std::cout << "Starting Full Review Test for DMA version..." << std::endl;
+    std::cout << "Starting Full Review Test for DMA version (v2.1)..." << std::endl;
     setup();
 
     // Test 1: Pads

@@ -72,11 +72,16 @@ void initADC() {
     };
     adc_continuous_new_handle(&adc_config, &adc_handle);
 
+    adc_digi_pattern_config_t pattern = {
+        .atten = ADC_ATTEN_DB_11,
+        .channel = ADC_CHAN & 0x7, // Only the channel number
+        .unit = ADC_UNIT_1,
+        .bit_width = ADC_BITWIDTH_12
+    };
+
     adc_continuous_config_t dig_cfg = {
         .pattern_num = 1,
-        .adc_pattern = {
-            {.atten = ADC_ATTEN_DB_11, .channel = ADC_CHAN, .unit = ADC_UNIT_1, .bit_width = ADC_BITWIDTH_12}
-        },
+        .adc_pattern = &pattern,
         .sample_freq_hz = SAMPLING_RATE_HZ,
         .conv_mode = ADC_CONV_SINGLE_UNIT_1,
         .format = ADC_DIGI_OUTPUT_FORMAT_TYPE1,
@@ -97,6 +102,7 @@ void initDAC() {
     };
     dac_continuous_new_channels(&dac_config, &dac_handle);
     dac_continuous_enable(dac_handle);
+    dac_continuous_start(dac_handle);
 }
 
 // --- File Operations ---
